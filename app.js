@@ -16,8 +16,10 @@ try { db.expenses = JSON.parse(localStorage.getItem(CACHE)) || []; } catch {}
 const save = () => { try { localStorage.setItem(CACHE, JSON.stringify(db.expenses)); } catch {} };
 let me = null, viewing = null; // me = quien ha iniciado sesión; viewing = de quién es el resumen que se ve
 
-const toRow = e => ({ id: e.id, user_id: e.userId, amount: e.amount, cat: e.cat, descr: e.desc, date: e.date, grp: e.group || null, total: e.total || null, with_ids: e.with || null });
-const fromRow = r => ({ id: r.id, userId: r.user_id, amount: +r.amount, cat: r.cat, desc: r.descr || r.cat, date: r.date, ...(r.grp && { group: r.grp, total: +r.total, with: r.with_ids }) });
+const toRow = e => ({ id: e.id, user_id: e.userId, amount: e.amount, cat: e.cat, descr: e.desc, date: e.date, grp: e.group || null, total: e.total || null, with_ids: e.with || null, ...(e.paidBy && { paid_by: e.paidBy }) });
+const fromRow = r => ({ id: r.id, userId: r.user_id, amount: +r.amount, cat: r.cat, desc: r.descr || r.cat, date: r.date, ...(r.grp && { group: r.grp, total: +r.total, with: r.with_ids, paidBy: r.paid_by }) });
+// Quien añade un gasto compartido es quien lo ha pagado.
+const paid = e => e.paidBy && person(e.paidBy) ? ` · <span class="pdot" style="background:${person(e.paidBy).color}"></span>pagó ${person(e.paidBy).name}` : '';
 
 async function load() {
   const all = [];
@@ -88,7 +90,7 @@ function commit(p, voice) {
   // Al editar se reutilizan las filas existentes (mismo id) y se quitan las de quien ya no participa.
   const old = editing ? db.expenses.filter(x => editing.group ? x.group === editing.group : x === editing) : [];
   const group = p.split.length > 1 ? (editing?.group || uid()) : null;
-  const added = p.split.map(userId => ({ id: old.find(o => o.userId === userId)?.id || uid(), userId, amount: share, cat: p.cat, desc: p.desc || p.cat, date: p.date, ...(group && { group, total: p.amount, with: p.split }) }));
+  const added = p.split.map(userId => ({ id: old.find(o => o.userId === userId)?.id || uid(), userId, amount: share, cat: p.cat, desc: p.desc || p.cat, date: p.date, ...(group && { group, total: p.amount, with: p.split, paidBy: editing ? old[0]?.paidBy : me }) }));
   const removed = old.filter(o => !p.split.includes(o.userId));
   const drop = () => db.expenses = db.expenses.filter(x => !added.includes(x)).concat(old);
   db.expenses = db.expenses.filter(x => !old.includes(x)).concat(added); save();
@@ -198,7 +200,7 @@ function dashboard(ex, both) {
     <div class="grid">
       <div class="card glass">${donut(cats, total)}</div>
       <div class="card glass"><h3>Categorías</h3>${catRows || `<div class="empty">Sin gastos ${both ? 'compartidos' : ''} este mes.<br>Escribe abajo, por ejemplo “${both ? 'cena 40 con Álvaro' : '40 gasolina'}”.</div>`}</div>
-      ${both && shared.length ? `<div class="card glass wide"><h3>Gastos compartidos este mes</h3>${shared.map(e => `<div class="row">${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}</div><small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} · ${eur(e.total / e.with.length)} cada uno</small></div><b>${eur(e.total)}</b></div>`).join('')}</div>` : ''}
+      ${both && shared.length ? `<div class="card glass wide"><h3>Gastos compartidos este mes</h3>${shared.map(e => `<div class="row">${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}</div><small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} · ${eur(e.total / e.with.length)} cada uno${paid(e)}</small></div><b>${eur(e.total)}</b></div>`).join('')}</div>` : ''}
       <div class="card glass"><h3>Por semana</h3>${wk.length ? vbars(wk) : '<div class="empty">—</div>'}</div>
       <div class="card glass"><h3>Últimos 6 meses</h3>${vbars(lastMonths(ex.filter(e => e.cat !== 'Inversión')))}</div>
     </div>`;
@@ -207,7 +209,7 @@ function dashboard(ex, both) {
 function entry(e, both) {
   const others = e.group ? e.with.filter(id => id !== e.userId).map(id => person(id)?.name || '?').join(', ') : '';
   return `<div class="row" ${e.userId === me ? role(`data-edit="${e.id}" title="Editar"`) : ''}>${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}${e.group && !both ? `<span class="badge">de ${eur(e.total)}</span>` : ''}</div>
-    <small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}${both ? ` · ${eur(e.total / e.with.length)} cada uno` : others ? ' · con ' + esc(others) : ''}</small></div>
+    <small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}${both ? ` · ${eur(e.total / e.with.length)} cada uno` : others ? ' · con ' + esc(others) : ''}${paid(e)}</small></div>
     <b>${eur(e.amount)}</b>${e.userId === me ? `<button data-del="${e.id}" aria-label="Borrar" style="width:32px;height:32px;min-height:0;padding:0">${svg(I.x)}</button>` : ''}</div>`;
 }
 
