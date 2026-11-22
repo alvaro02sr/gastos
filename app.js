@@ -66,7 +66,7 @@ const ic = c => `<span class="ic" style="--c:${C(c).color}">${svg(C(c).p)}</span
 const I = { mic: 'M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3', l: 'M15 18l-6-6 6-6', r: 'M9 18l6-6-6-6', x: 'M6 6l12 12M18 6L6 18', users: 'M16 20v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 20v-1a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8' };
 const monthName = d => d.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
 
-let tab = 'resumen', detail = null, over = {}, lastKey = '';
+let tab = 'resumen', detail = null, over = {}, lastKey = '', editing = null;
 const month = new Date(); month.setDate(1);
 
 // Personas cuyo nombre aparece en el texto -> gasto compartido.
@@ -85,12 +85,21 @@ function commit(p, voice) {
   if (!p.amount) return toast('Falta el importe. Ej: "12 cena"');
   // shortcut: reparto a partes iguales con redondeo a céntimos; importes distintos por persona si se necesita.
   const share = Math.round(p.amount / p.split.length * 100) / 100;
-  const group = p.split.length > 1 ? uid() : null;
-  const added = p.split.map(userId => ({ id: uid(), userId, amount: share, cat: p.cat, desc: p.desc || p.cat, date: p.date, ...(group && { group, total: p.amount, with: p.split }) }));
-  const drop = () => db.expenses = db.expenses.filter(x => !added.includes(x));
-  db.expenses.push(...added); save();
+  // Al editar se reutilizan las filas existentes (mismo id) y se quitan las de quien ya no participa.
+  const old = editing ? db.expenses.filter(x => editing.group ? x.group === editing.group : x === editing) : [];
+  const group = p.split.length > 1 ? (editing?.group || uid()) : null;
+  const added = p.split.map(userId => ({ id: old.find(o => o.userId === userId)?.id || uid(), userId, amount: share, cat: p.cat, desc: p.desc || p.cat, date: p.date, ...(group && { group, total: p.amount, with: p.split }) }));
+  const removed = old.filter(o => !p.split.includes(o.userId));
+  const drop = () => db.expenses = db.expenses.filter(x => !added.includes(x)).concat(old);
+  db.expenses = db.expenses.filter(x => !old.includes(x)).concat(added); save();
+  const wasEdit = !!editing;
+  closeDock(); render();
+  if (wasEdit) {
+    // Primero se guarda lo nuevo y solo después se borra lo sobrante: si algo falla no se pierde nada.
+    remote(sb.from('expenses').upsert(added.map(toRow)).then(r => r.error || !removed.length ? r : sb.from('expenses').delete().in('id', removed.map(x => x.id))), drop);
+    return toast('Gasto actualizado');
+  }
   remote(sb.from('expenses').insert(added.map(toRow)), drop);
-  over = {}; $('#q').value = ''; $('#q').blur(); sheet(); render();
   toast(`${voice ? 'Dictado · ' : ''}${eur(p.amount)} · ${p.cat}${group ? ' · compartido' : ''}`, () => {
     drop(); save(); render();
     remote(sb.from('expenses').delete().in('id', added.map(x => x.id)), () => db.expenses.push(...added));
@@ -116,13 +125,13 @@ function sheet() {
   }
   const p = draft();
   $('#sheet').innerHTML = `
-    <div class="draft"><b>${p.amount ? eur(p.amount) : '— €'}</b><span class="muted">${esc(p.desc)}</span></div>
+    <div class="draft">${editing ? '<span class="badge" style="margin:0">Editando</span>' : ''}<b>${p.amount ? eur(p.amount) : '— €'}</b><span class="muted">${esc(p.desc)}</span></div>
     <div class="cats">${Object.keys(CATS).map(c => `<button type="button" data-cat="${c}" class="${c === p.cat ? 'on' : ''}" style="--c:${CATS[c].color}">${svg(CATS[c].p)}<small>${CATS[c].s}</small></button>`).join('')}</div>
     <div class="chips"><button type="button" disabled aria-label="Compartir con">${svg(I.users)}</button>${PEOPLE.map(u => `<button type="button" data-split="${u.id}" class="${p.split.includes(u.id) ? 'on' : ''}" style="--pc:${u.color}">${u.name}</button>`).join('')}</div>
     <div class="opts"><input type="date" id="pd" value="${p.date}" aria-label="Fecha">
       ${p.split.length > 1 && p.amount ? `<small class="muted">${eur(p.amount / p.split.length)} c/u</small>` : ''}
       <button type="button" data-cancel style="margin-left:auto">Cancelar</button>
-      <button class="pri" type="submit" form="add" style="margin-left:0">Guardar</button></div>`;
+      <button class="pri" type="submit" form="add" style="margin-left:0">${editing ? 'Guardar cambios' : 'Guardar'}</button></div>`;
 }
 
 let toastT;
@@ -197,7 +206,7 @@ function dashboard(ex, both) {
 
 function entry(e, both) {
   const others = e.group ? e.with.filter(id => id !== e.userId).map(id => person(id)?.name || '?').join(', ') : '';
-  return `<div class="row">${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}${e.group && !both ? `<span class="badge">de ${eur(e.total)}</span>` : ''}</div>
+  return `<div class="row" ${e.userId === me ? role(`data-edit="${e.id}" title="Editar"`) : ''}>${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}${e.group && !both ? `<span class="badge">de ${eur(e.total)}</span>` : ''}</div>
     <small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}${both ? ` · ${eur(e.total / e.with.length)} cada uno` : others ? ' · con ' + esc(others) : ''}</small></div>
     <b>${eur(e.amount)}</b>${e.userId === me ? `<button data-del="${e.id}" aria-label="Borrar" style="width:32px;height:32px;min-height:0;padding:0">${svg(I.x)}</button>` : ''}</div>`;
 }
@@ -234,7 +243,7 @@ function countUp() {
 
 function render() {
   const logged = !!me;
-  $('#dock').style.display = $('nav').style.display = $('#people').style.display = logged ? '' : 'none';
+  for (const s of ['#dock', '#fab', 'nav', '#people']) $(s).style.display = logged ? '' : 'none';
   if (!logged) {
     lastKey = '';
     $('#main').innerHTML = `<form id="login" class="card glass" style="max-width:380px;margin:60px auto;display:grid;gap:10px">
@@ -279,7 +288,9 @@ document.addEventListener('click', e => {
     over.split = s.includes(d.split) ? (s.length > 1 ? s.filter(x => x !== d.split) : s) : [...s, d.split];
     return sheet();
   }
-  if ('cancel' in d) return cancel();
+  if ('cancel' in d) return closeDock();
+  if ('add' in d) return openDock();
+  if (d.edit) return openDock(db.expenses.find(x => x.id === d.edit));
   if (d.quick) { const q = $('#sheet').quick[d.quick]; return commit({ amount: q.amount, cat: q.cat, desc: q.desc, date: iso(new Date()), split: [me] }); }
   if ('logout' in d) { sb.auth.signOut(); me = viewing = null; db.expenses = []; save(); }
   else if (d.tab) { tab = d.tab; detail = null; }
@@ -296,9 +307,21 @@ document.addEventListener('click', e => {
   render();
 });
 document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('[role=button]')) e.target.click(); });
-const cancel = () => { $('#q').value = ''; over = {}; $('#q').blur(); sheet(); };
-$('#q').onkeydown = e => { if (e.key === 'Escape') cancel(); };
-$('#q').oninput =() => { if (!$('#q').value.trim()) over = {}; sheet(); }; // lo elegido a mano se mantiene mientras escribes
+// El panel de entrada se abre con el botón + o al tocar un gasto propio (para editarlo).
+function openDock(e) {
+  editing = e || null;
+  if (e) {
+    // Importe primero para que un número dentro del concepto ("2 cañas") no se tome como importe.
+    $('#q').value = `${String(e.total || e.amount).replace('.', ',')} ${e.desc}`;
+    over = { cat: e.cat, date: e.date, split: e.with || [e.userId] };
+  }
+  $('#dock').classList.add('open'); sheet(); $('#q').focus();
+}
+function closeDock() { $('#q').value = ''; over = {}; editing = null; $('#q').blur(); $('#dock').classList.remove('open'); sheet(); }
+$('#q').onkeydown = e => { if (e.key === 'Escape') closeDock(); };
+$('#close').innerHTML = svg(I.x);
+$('#fab').innerHTML = svg('M12 5v14M5 12h14');
+$('#q').oninput =() => { if (!$('#q').value.trim() && !editing) over = {}; sheet(); }; // lo elegido a mano se mantiene mientras escribes
 $('#sheet').onchange = e => { if (e.target.id === 'pd') over.date = e.target.value; };
 $('#add').onsubmit = e => { e.preventDefault(); if ($('#q').value.trim()) commit(draft()); };
 
