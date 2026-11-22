@@ -1,20 +1,56 @@
-// shortcut: datos en localStorage de este navegador; para compartir entre móviles hace falta un backend.
-const KEY = 'gastos-v1';
-let db = null;
-try { db = JSON.parse(localStorage.getItem(KEY)); } catch {}
-db ||= { users: [], expenses: [], current: null };
-db.expenses.forEach(e => { if (e.cat === 'Deporte' || e.cat === 'Salud y cuidado') e.cat = 'Deporte y salud'; });
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch { alert('No se pudo guardar'); } };
+// ===== Configuración (datos públicos: la seguridad la ponen el login y las reglas RLS de Supabase) =====
+const SUPABASE_URL = 'https://odfwalzmhqhjownxiwvb.supabase.co'; // Project URL
+const SUPABASE_KEY = 'sb_publishable_kYuGpuCyqhEgkPTy99GYnw_CbFEZdAo';
+// UID de cada uno: Supabase → Authentication → Users → columna UID.
+const PEOPLE = [
+  { key: 'carmen', name: 'Carmen', color: '#ff2d55', id: '07b48804-59ef-4eb1-abbe-181100bd2c5a' },
+  { key: 'alvaro', name: 'Álvaro', color: '#0a84ff', id: '224c11aa-8fba-424a-8607-eb3fd9dbd336' },
+];
+// =====================================================================================================
 
-// Solo dos personas usan la app. Se reutilizan usuarios ya creados con ese nombre.
-const PEOPLE = [{ key: 'carmen', name: 'Carmen', color: '#ff2d55' }, { key: 'alvaro', name: 'Álvaro', color: '#0a84ff' }];
-for (const p of PEOPLE) {
-  const u = db.users.find(u => norm(u.name) === p.key);
-  p.id = u ? u.id : p.key;
-  if (!u) db.users.push({ id: p.key, name: p.name, friends: [] });
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+// Copia local solo como caché para abrir rápido; la verdad está en Supabase.
+const CACHE = 'gastos-cache';
+const db = { expenses: [] };
+try { db.expenses = JSON.parse(localStorage.getItem(CACHE)) || []; } catch {}
+const save = () => { try { localStorage.setItem(CACHE, JSON.stringify(db.expenses)); } catch {} };
+let me = null, viewing = null; // me = quien ha iniciado sesión; viewing = de quién es el resumen que se ve
+
+const toRow = e => ({ id: e.id, user_id: e.userId, amount: e.amount, cat: e.cat, descr: e.desc, date: e.date, grp: e.group || null, total: e.total || null, with_ids: e.with || null });
+const fromRow = r => ({ id: r.id, userId: r.user_id, amount: +r.amount, cat: r.cat, desc: r.descr || r.cat, date: r.date, ...(r.grp && { group: r.grp, total: +r.total, with: r.with_ids }) });
+
+async function load() {
+  const all = [];
+  for (let from = 0; ; from += 1000) { // Supabase devuelve como mucho 1000 filas por consulta
+    const { data, error } = await sb.from('expenses').select('*').range(from, from + 999);
+    if (error) return toast('Sin conexión: mostrando datos guardados');
+    all.push(...data);
+    if (data.length < 1000) break;
+  }
+  db.expenses = all.map(fromRow); save(); render(); sheet();
 }
-if (!PEOPLE.some(p => p.id === db.current)) db.current = PEOPLE[0].id;
-save();
+
+// Aplica el cambio en pantalla al momento y lo deshace si Supabase falla.
+// shortcut: sin conexión no se guarda (avisa); cola offline si hiciera falta.
+async function remote(op, rollback) {
+  const { error } = await op;
+  if (error) { rollback(); save(); render(); toast('No se pudo guardar: ' + error.message); }
+}
+
+// Una sola vez: sube los gastos de la versión anterior guardados en este navegador.
+async function importOld() {
+  let old; try { old = JSON.parse(localStorage.getItem('gastos-v1')); } catch {}
+  if (!old?.expenses?.length) return;
+  localStorage.setItem('gastos-v1-local', localStorage.getItem('gastos-v1')); localStorage.removeItem('gastos-v1');
+  if (!confirm(`¿Subir ${old.expenses.length} gastos guardados antes en este dispositivo?`)) return;
+  const idOf = {};
+  old.users.forEach(u => idOf[u.id] = PEOPLE.find(p => p.key === norm(u.name))?.id);
+  const fix = c => (c === 'Deporte' || c === 'Salud y cuidado') ? 'Deporte y salud' : c;
+  const rows = old.expenses.filter(e => idOf[e.userId]).map(e => toRow({ ...e, cat: fix(e.cat), userId: idOf[e.userId], with: e.with?.map(id => idOf[id]).filter(Boolean) }));
+  const { error } = await sb.from('expenses').insert(rows);
+  if (error) return toast('Error al importar: ' + error.message);
+  toast(`${rows.length} gastos importados`); load();
+}
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"']/g, c => '&#' + c.charCodeAt(0) + ';');
@@ -24,7 +60,7 @@ const person = id => PEOPLE.find(p => p.id === id);
 const ym = d => iso(d).slice(0, 7);
 const C = c => CATS[c] || CATS.Otros;
 const sum = a => a.reduce((s, e) => s + e.amount, 0);
-const mine = () => db.expenses.filter(e => e.userId === db.current);
+const mine = () => db.expenses.filter(e => e.userId === me);
 const svg = d => `<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
 const ic = c => `<span class="ic" style="--c:${C(c).color}">${svg(C(c).p)}</span>`;
 const I = { mic: 'M12 3a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5 11a7 7 0 0 0 14 0M12 18v3', l: 'M15 18l-6-6 6-6', r: 'M9 18l6-6-6-6', x: 'M6 6l12 12M18 6L6 18', users: 'M16 20v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 20v-1a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8' };
@@ -36,7 +72,7 @@ const month = new Date(); month.setDate(1);
 // Personas cuyo nombre aparece en el texto -> gasto compartido.
 function detectSplit(text) {
   const n = norm(text);
-  return [db.current, ...PEOPLE.filter(p => p.id !== db.current && new RegExp(`\\b${p.key}\\b`).test(n)).map(p => p.id)];
+  return [me, ...PEOPLE.filter(p => p.id !== me && new RegExp(`\\b${p.key}\\b`).test(n)).map(p => p.id)];
 }
 
 function draft() {
@@ -51,10 +87,14 @@ function commit(p, voice) {
   const share = Math.round(p.amount / p.split.length * 100) / 100;
   const group = p.split.length > 1 ? uid() : null;
   const added = p.split.map(userId => ({ id: uid(), userId, amount: share, cat: p.cat, desc: p.desc || p.cat, date: p.date, ...(group && { group, total: p.amount, with: p.split }) }));
+  const drop = () => db.expenses = db.expenses.filter(x => !added.includes(x));
   db.expenses.push(...added); save();
+  remote(sb.from('expenses').insert(added.map(toRow)), drop);
   over = {}; $('#q').value = ''; $('#q').blur(); sheet(); render();
-  toast(`${voice ? 'Dictado · ' : ''}${eur(p.amount)} · ${p.cat}${group ? ' · compartido' : ''}`,
-    () => { db.expenses = db.expenses.filter(x => !added.includes(x)); save(); render(); });
+  toast(`${voice ? 'Dictado · ' : ''}${eur(p.amount)} · ${p.cat}${group ? ' · compartido' : ''}`, () => {
+    drop(); save(); render();
+    remote(sb.from('expenses').delete().in('id', added.map(x => x.id)), () => db.expenses.push(...added));
+  });
 }
 
 // Gastos más repetidos (últimos 90 días) como botones de un toque.
@@ -131,9 +171,7 @@ function dashboard(ex, both) {
   const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
   const max = cats[0]?.[1] || 1;
   const catRows = cats.map(([c, v]) => {
-    const bar = both
-      ? PEOPLE.map(p => `<span style="width:${sum(gastos.filter(e => e.cat === c && e.userId === p.id)) / max * 100}%;background:${p.color}"></span>`).join('')
-      : `<span style="width:${v / max * 100}%;background:${C(c).color}"></span>`;
+    const bar = `<span style="width:${v / max * 100}%;background:${C(c).color}"></span>`;
     return `<div class="row" ${role(`data-open="${c}"`)}>${ic(c)}<div class="l"><div class="t">${c}</div><div class="bar">${bar}</div></div><div style="text-align:right"><b>${eur(v)}</b><br><small>${Math.round(v / total * 100)}%</small></div></div>`;
   }).join('');
 
@@ -143,17 +181,15 @@ function dashboard(ex, both) {
 
   const trend = diff !== null ? `<em class="${diff > 0 ? 'up' : 'down'}">${diff > 0 ? '▲' : '▼'} ${Math.abs(diff)}% vs mes anterior</em>` : '<em class="muted">—</em>';
   const kpis = both
-    ? kpi('Gastado entre los dos', total, trend) + PEOPLE.map(p => kpi(p.name, sum(gastos.filter(e => e.userId === p.id)), `<em class="muted">${total ? Math.round(sum(gastos.filter(e => e.userId === p.id)) / total * 100) : 0}% del total</em>`, p.color)).join('') + kpi('Invertido', inv, '', 'var(--inv)')
+    ? kpi('Gastado juntos', total, trend) + kpi('Media diaria', total / days) + kpi('Por persona', total / PEOPLE.length) + kpi('Mes anterior', prevG)
     : kpi('Gastado', total, trend) + kpi('Media diaria', total / days) + kpi('Invertido', inv, '', 'var(--inv)') + kpi('Mes anterior', prevG);
-
-  // Gastos compartidos: un registro por grupo.
-  const shared = both ? Object.values(Object.fromEntries(cur.filter(e => e.group).map(e => [e.group, e]))).sort((a, b) => b.date.localeCompare(a.date)) : [];
+  const shared = both ? [...cur].sort((a, b) => b.date.localeCompare(a.date)) : [];
 
   return `<div class="kpis">${kpis}</div>
     <div class="grid">
       <div class="card glass">${donut(cats, total)}</div>
-      <div class="card glass"><h3>Categorías${both ? ` · <span class="pdot" style="background:${PEOPLE[0].color}"></span>${PEOPLE[0].name} <span class="pdot" style="background:${PEOPLE[1].color}"></span>${PEOPLE[1].name}` : ''}</h3>${catRows || '<div class="empty">Sin gastos este mes.<br>Escribe abajo, por ejemplo “40 gasolina”.</div>'}</div>
-      ${both ? `<div class="card glass wide"><h3>Gastos compartidos este mes · ${eur(sum(shared.map(e => ({ amount: e.total }))))}</h3>${shared.map(e => `<div class="row">${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}</div><small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} · ${eur(e.amount)} cada uno</small></div><b>${eur(e.total)}</b></div>`).join('') || '<div class="empty">Ninguno. Escribe por ejemplo “cena 40 con Álvaro”.</div>'}</div>` : ''}
+      <div class="card glass"><h3>Categorías</h3>${catRows || `<div class="empty">Sin gastos ${both ? 'compartidos' : ''} este mes.<br>Escribe abajo, por ejemplo “${both ? 'cena 40 con Álvaro' : '40 gasolina'}”.</div>`}</div>
+      ${both && shared.length ? `<div class="card glass wide"><h3>Gastos compartidos este mes</h3>${shared.map(e => `<div class="row">${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}</div><small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })} · ${eur(e.total / e.with.length)} cada uno</small></div><b>${eur(e.total)}</b></div>`).join('')}</div>` : ''}
       <div class="card glass"><h3>Por semana</h3>${wk.length ? vbars(wk) : '<div class="empty">—</div>'}</div>
       <div class="card glass"><h3>Últimos 6 meses</h3>${vbars(lastMonths(ex.filter(e => e.cat !== 'Inversión')))}</div>
     </div>`;
@@ -161,9 +197,9 @@ function dashboard(ex, both) {
 
 function entry(e, both) {
   const others = e.group ? e.with.filter(id => id !== e.userId).map(id => person(id)?.name || '?').join(', ') : '';
-  return `<div class="row">${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}${e.group ? `<span class="badge">de ${eur(e.total)}</span>` : ''}</div>
-    <small>${both ? `<span class="pdot" style="background:${person(e.userId)?.color}"></span>${person(e.userId)?.name} · ` : ''}${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}${others ? ' · con ' + esc(others) : ''}</small></div>
-    <b>${eur(e.amount)}</b>${e.userId === db.current ? `<button data-del="${e.id}" aria-label="Borrar" style="width:32px;height:32px;min-height:0;padding:0">${svg(I.x)}</button>` : ''}</div>`;
+  return `<div class="row">${ic(e.cat)}<div class="l"><div class="t">${esc(e.desc)}${e.group && !both ? `<span class="badge">de ${eur(e.total)}</span>` : ''}</div>
+    <small>${new Date(e.date + 'T12:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}${both ? ` · ${eur(e.total / e.with.length)} cada uno` : others ? ' · con ' + esc(others) : ''}</small></div>
+    <b>${eur(e.amount)}</b>${e.userId === me ? `<button data-del="${e.id}" aria-label="Borrar" style="width:32px;height:32px;min-height:0;padding:0">${svg(I.x)}</button>` : ''}</div>`;
 }
 
 // Todo lo registrado en una categoría, agrupado por mes.
@@ -197,13 +233,34 @@ function countUp() {
 }
 
 function render() {
+  const logged = !!me;
+  $('#dock').style.display = $('nav').style.display = $('#people').style.display = logged ? '' : 'none';
+  if (!logged) {
+    lastKey = '';
+    $('#main').innerHTML = `<form id="login" class="card glass" style="max-width:380px;margin:60px auto;display:grid;gap:10px">
+      <h2 style="margin:0">Hola 👋</h2><small class="muted">Inicia sesión para ver vuestros gastos.</small>
+      <input id="le" type="email" placeholder="Email" autocomplete="email" required style="border:0;background:var(--chip);border-radius:14px;padding:12px">
+      <input id="lp" type="password" placeholder="Contraseña" autocomplete="current-password" required style="border:0;background:var(--chip);border-radius:14px;padding:12px">
+      <button class="pri">Entrar</button></form>`;
+    $('#login').onsubmit = async ev => {
+      ev.preventDefault();
+      const { data, error } = await sb.auth.signInWithPassword({ email: $('#le').value.trim(), password: $('#lp').value });
+      if (error) return toast('Email o contraseña incorrectos');
+      start(data.session);
+    };
+    return;
+  }
   const both = tab === 'juntos';
-  const key = [tab, detail, ym(month), db.current].join();
+  const key = [tab, detail, ym(month), viewing].join();
   const anim = key !== lastKey; lastKey = key;
-  document.body.dataset.theme = both ? 'both' : person(db.current).key;
-  $('#people').innerHTML = PEOPLE.map(p => `<button data-me="${p.id}" class="${p.id === db.current ? 'on' : ''}" style="--pc:${p.color}"><span class="av">${p.name[0]}</span>${p.name}</button>`).join('');
+  document.body.dataset.theme = both ? 'both' : person(viewing).key;
+  $('#people').innerHTML = PEOPLE.map(p => `<button data-me="${p.id}" class="${p.id === viewing ? 'on' : ''}" style="--pc:${p.color}"><span class="av">${p.name[0]}</span>${p.name}</button>`).join('')
+    + `<button data-logout title="Cerrar sesión" style="font-size:13px">Salir</button>`;
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
-  const ex = db.expenses.filter(e => (both ? PEOPLE.map(p => p.id) : [db.current]).includes(e.userId));
+  // Juntos: solo gastos compartidos, uno por grupo y con su importe total. Usuario: solo los suyos.
+  const ex = both
+    ? Object.values(Object.fromEntries(db.expenses.filter(e => e.group).map(e => [e.group, { ...e, amount: e.total, userId: null }])))
+    : db.expenses.filter(e => e.userId === viewing);
   const nav = `<div class="month"><b>${monthName(month)}</b><button data-m="-1" aria-label="Mes anterior">${svg(I.l)}</button><button data-m="1" aria-label="Mes siguiente">${svg(I.r)}</button></div>`;
   const main = $('#main');
   main.innerHTML = detail ? detailView(ex, both) : nav + (tab === 'movs' ? movs(ex, both) : dashboard(ex, both));
@@ -223,13 +280,18 @@ document.addEventListener('click', e => {
     return sheet();
   }
   if ('cancel' in d) return cancel();
-  if (d.quick) { const q = $('#sheet').quick[d.quick]; return commit({ amount: q.amount, cat: q.cat, desc: q.desc, date: iso(new Date()), split: [db.current] }); }
-  if (d.tab) { tab = d.tab; detail = null; }
-  else if (d.me) { db.current = d.me; over = {}; save(); sheet(); if (tab === 'juntos') tab = 'resumen'; }
+  if (d.quick) { const q = $('#sheet').quick[d.quick]; return commit({ amount: q.amount, cat: q.cat, desc: q.desc, date: iso(new Date()), split: [me] }); }
+  if ('logout' in d) { sb.auth.signOut(); me = viewing = null; db.expenses = []; save(); }
+  else if (d.tab) { tab = d.tab; detail = null; }
+  else if (d.me) { viewing = d.me; if (tab === 'juntos') tab = 'resumen'; }
   else if (d.m) month.setMonth(month.getMonth() + +d.m);
   else if (d.open) { detail = d.open; scrollTo({ top: 0, behavior: 'smooth' }); }
   else if ('back' in d) detail = null;
-  else if (d.del) { db.expenses = db.expenses.filter(x => x.id !== d.del); save(); sheet(); }
+  else if (d.del) {
+    const gone = db.expenses.find(x => x.id === d.del);
+    db.expenses = db.expenses.filter(x => x !== gone); save(); sheet();
+    remote(sb.from('expenses').delete().eq('id', d.del), () => db.expenses.push(gone));
+  }
   else return;
   render();
 });
@@ -256,5 +318,14 @@ else $('#mic').onclick = () => {
   $('#mic').classList.add('on'); r.start();
 };
 
+function start(session) {
+  if (!session) { me = null; return render(); }
+  if (!person(session.user.id)) { sb.auth.signOut(); me = null; render(); return toast('Este usuario no está en PEOPLE (app.js)'); }
+  me = viewing = session.user.id;
+  render(); sheet(); load(); importOld();
+}
+// Al volver a la app, trae lo que haya añadido la otra persona.
+document.addEventListener('visibilitychange', () => { if (!document.hidden && me) load(); });
+
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
-render(); sheet();
+sb.auth.getSession().then(({ data }) => start(data.session));
